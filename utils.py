@@ -165,3 +165,24 @@ def enrich_post(post, db, current_user_id=None) -> dict:
             is not None
         )
     return post_dict(post, like_count=like_count, liked_by_me=liked_by_me, comment_count=comment_count, saved_by_me=saved_by_me)
+
+
+def message_dict(message) -> dict:
+    return {
+        "id": message.id,
+        "conversation_id": message.conversation_id,
+        "sender_id": message.sender_id,
+        "body": message.body,
+        "created_at": fmt_dt(message.created_at),
+        "is_deleted_for_everyone": message.is_deleted_for_everyone,
+    }
+
+
+def conversation_dict(conversation, other_user, last_message=None, unread_count=0) -> dict:
+    return {
+        "id": conversation.id,
+        "other_user": user_dict(other_user) if other_user else None,
+        "last_message": message_dict(last_message) if last_message else None,
+        "unread_count": unread_count,
+        "created_at": fmt_dt(conversation.created_at),
+    }

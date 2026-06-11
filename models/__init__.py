@@ -9,3 +9,6 @@ from .reel import Reel
 from .reel_like import ReelLike
 from .reel_comment import ReelComment
 from .reel_save import ReelSave
+from .conversation import Conversation
+from .conversation_participant import ConversationParticipant
+from .message import Message
