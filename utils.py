@@ -205,3 +205,18 @@ def conversation_dict(conversation, other_user, last_message=None, unread_count=
         "unread_count": unread_count,
         "created_at": fmt_dt(conversation.created_at),
     }
+
+
+def notification_dict(n) -> dict:
+    return {
+        "id": n.id,
+        "type": n.type,
+        "entity_id": n.entity_id,
+        "is_read": n.is_read,
+        "created_at": fmt_dt(n.created_at),
+        "actor": {
+            "id": n.actor.id,
+            "username": n.actor.username,
+            "profile_picture_url": n.actor.profile_picture_url or "",
+        } if n.actor else None,
+    }

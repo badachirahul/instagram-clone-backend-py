@@ -6,6 +6,7 @@ from database import get_db
 from dependencies import require_auth
 from models import Conversation, ConversationParticipant, Message, User
 from schemas.message import ConversationCreate, MessageCreate
+from services.notifications import create_notification
 from utils import conversation_dict, message_dict
 from ws_manager import manager as ws_manager
 
@@ -82,6 +83,8 @@ def create_or_get_conversation(
     db.add(ConversationParticipant(conversation_id=conv.id, user_id=body.user_id))
     db.commit()
     db.refresh(conv)
+
+    create_notification(db, body.user_id, current_user_id, "message_request", conv.id, ws_manager=ws_manager)
 
     return {"conversation": conversation_dict(conv, target)}
 

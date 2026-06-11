@@ -6,7 +6,9 @@ from dependencies import optional_auth, require_auth
 from models import Follow, Reel, ReelComment, ReelLike, ReelSave
 from schemas.comment import CommentCreate
 from schemas.reel import ReelCreate, ReelUpdate
+from services.notifications import create_notification
 from utils import enrich_reel, reel_comment_dict
+from ws_manager import manager as ws_manager
 
 router = APIRouter(prefix="/api/reels")
 
@@ -139,6 +141,7 @@ def like_reel(
     if not existing:
         db.add(ReelLike(user_id=current_user_id, reel_id=reel_id))
         db.commit()
+        create_notification(db, reel.user_id, current_user_id, "reel_like", reel_id, ws_manager=ws_manager)
     like_count = db.query(ReelLike).filter(ReelLike.reel_id == reel_id).count()
     return {"liked_by_me": True, "like_count": like_count}
 
@@ -262,6 +265,7 @@ def create_reel_comment(
         .filter(ReelComment.id == comment.id)
         .first()
     )
+    create_notification(db, reel.user_id, current_user_id, "reel_comment", reel_id, ws_manager=ws_manager)
     return {"comment": reel_comment_dict(comment)}
 
 

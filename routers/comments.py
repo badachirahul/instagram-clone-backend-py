@@ -6,7 +6,9 @@ from database import get_db
 from dependencies import optional_auth, require_auth
 from models import Comment, CommentLike, Post
 from schemas.comment import CommentCreate
+from services.notifications import create_notification
 from utils import comment_dict
+from ws_manager import manager as ws_manager
 
 router = APIRouter(prefix="/api/posts")
 
@@ -124,6 +126,11 @@ def create_comment(
         .filter(Comment.id == comment.id)
         .first()
     )
+    # Notify post owner of new comment; for replies also notify the replied-to user
+    create_notification(db, post.user_id, current_user_id, "post_comment", post_id, ws_manager=ws_manager)
+    if body.reply_to_user_id and body.reply_to_user_id != post.user_id:
+        create_notification(db, body.reply_to_user_id, current_user_id, "comment_reply", post_id, ws_manager=ws_manager)
+
     # New comment always has 0 likes and is not liked
     return {"comment": comment_dict(comment)}
 

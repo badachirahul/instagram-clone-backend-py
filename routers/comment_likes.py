@@ -4,6 +4,8 @@ from sqlalchemy.orm import Session
 from database import get_db
 from dependencies import require_auth
 from models import Comment, CommentLike
+from services.notifications import create_notification
+from ws_manager import manager as ws_manager
 
 router = APIRouter(prefix="/api/comments")
 
@@ -24,6 +26,8 @@ def like_comment(
     if not existing:
         db.add(CommentLike(user_id=current_user_id, comment_id=comment_id))
         db.commit()
+        # entity_id = post_id so click navigates to the post
+        create_notification(db, comment.user_id, current_user_id, "comment_like", comment.post_id, ws_manager=ws_manager)
 
     likes_count = db.query(CommentLike).filter(CommentLike.comment_id == comment_id).count()
     return {"likes_count": likes_count, "is_liked": True}

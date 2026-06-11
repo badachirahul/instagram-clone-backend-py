@@ -4,6 +4,8 @@ from sqlalchemy.orm import Session
 from database import get_db
 from dependencies import require_auth
 from models import Like, Post
+from services.notifications import create_notification
+from ws_manager import manager as ws_manager
 
 router = APIRouter(prefix="/api/posts")
 
@@ -22,6 +24,7 @@ def like_post(
     if not existing:
         db.add(Like(user_id=current_user_id, post_id=post_id))
         db.commit()
+        create_notification(db, post.user_id, current_user_id, "post_like", post_id, ws_manager=ws_manager)
 
     like_count = db.query(Like).filter(Like.post_id == post_id).count()
     return {"like_count": like_count, "liked_by_me": True}

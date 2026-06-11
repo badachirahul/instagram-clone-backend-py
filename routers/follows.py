@@ -4,6 +4,8 @@ from sqlalchemy.orm import Session
 from database import get_db
 from dependencies import require_auth
 from models import Follow, User
+from services.notifications import create_notification
+from ws_manager import manager as ws_manager
 
 router = APIRouter(prefix="/api/users")
 
@@ -26,6 +28,7 @@ def follow_user(
     if not existing:
         db.add(Follow(follower_id=current_user_id, following_id=user_id))
         db.commit()
+        create_notification(db, user_id, current_user_id, "follow", ws_manager=ws_manager)
 
     followers_count = db.query(Follow).filter(Follow.following_id == user_id).count()
     return {"followers_count": followers_count, "is_following": True}
