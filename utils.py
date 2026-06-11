@@ -24,8 +24,8 @@ def decode_token(token: str):
 def fmt_dt(dt) -> str:
     if dt is None:
         return None
-    # No 'Z' suffix — stored as naive local time, let the client treat it as local
-    return dt.strftime("%Y-%m-%dT%H:%M:%S")
+    # Append Z so clients parse as UTC — DB stores naive UTC datetimes
+    return dt.strftime("%Y-%m-%dT%H:%M:%S") + "Z"
 
 
 def user_dict(user) -> dict:
