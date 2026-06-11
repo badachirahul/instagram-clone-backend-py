@@ -106,6 +106,25 @@ def reel_comment_dict(comment, replies=None) -> dict:
     }
 
 
+def story_dict(story, views_count: int = 0, is_viewed: bool = False) -> dict:
+    return {
+        "id": story.id,
+        "user_id": story.user_id,
+        "user": user_dict(story.user) if story.user else None,
+        "media_url": story.media_url,
+        "media_type": story.media_type,
+        "caption": story.caption or "",
+        "created_at": fmt_dt(story.created_at),
+        "expires_at": fmt_dt(story.expires_at),
+        "updated_at": fmt_dt(story.updated_at),
+        "views_count": views_count,
+        "is_viewed": is_viewed,
+        "story_group_id": story.story_group_id,
+        "segment_index": story.segment_index if story.segment_index is not None else 0,
+        "total_segments": story.total_segments if story.total_segments is not None else 1,
+    }
+
+
 def enrich_reel(reel, db, current_user_id=None) -> dict:
     from models import ReelLike, ReelComment, ReelSave, Follow
 

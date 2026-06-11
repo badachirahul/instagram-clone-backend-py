@@ -8,7 +8,7 @@ load_dotenv()
 
 from database import Base, engine
 import models  # registers all ORM models with Base.metadata
-from routers import auth, comment_likes, comments, feed, follows, likes, messages, posts, reels, saves, users
+from routers import auth, comment_likes, comments, feed, follows, likes, messages, posts, reels, saves, stories, users
 from utils import decode_token
 from ws_manager import manager as ws_manager
 
@@ -36,6 +36,7 @@ app.include_router(saves.router)
 app.include_router(reels.router)
 app.include_router(comments.router)
 app.include_router(comment_likes.router)
+app.include_router(stories.router)
 app.include_router(users.router)
 app.include_router(follows.router)
 app.include_router(feed.router)
