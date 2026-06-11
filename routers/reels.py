@@ -55,7 +55,25 @@ def get_reels(
         .limit(limit)
         .all()
     )
-    return {"reels": [enrich_reel(r, db, current_user_id) for r in reels]}
+    visible = [r for r in reels if not (r.user and r.user.is_private and r.user_id != current_user_id)]
+    return {"reels": [enrich_reel(r, db, current_user_id) for r in visible]}
+
+
+def _assert_can_view_reel(reel, current_user_id, db):
+    if not reel.user or not reel.user.is_private:
+        return
+    if current_user_id and current_user_id == reel.user_id:
+        return
+    if current_user_id:
+        is_following = (
+            db.query(Follow)
+            .filter(Follow.follower_id == current_user_id, Follow.following_id == reel.user_id)
+            .first()
+            is not None
+        )
+        if is_following:
+            return
+    raise HTTPException(status_code=403, detail="This account is private")
 
 
 @router.get("/{reel_id}")
@@ -67,6 +85,7 @@ def get_reel(
     reel = db.query(Reel).options(joinedload(Reel.user)).filter(Reel.id == reel_id).first()
     if not reel:
         raise HTTPException(status_code=404, detail="reel not found")
+    _assert_can_view_reel(reel, current_user_id, db)
     return {"reel": enrich_reel(reel, db, current_user_id)}
 
 

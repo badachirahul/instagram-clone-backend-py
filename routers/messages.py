@@ -4,7 +4,7 @@ from sqlalchemy.orm import Session, joinedload
 
 from database import get_db
 from dependencies import require_auth
-from models import Conversation, ConversationParticipant, Message, Post, Reel, User
+from models import Conversation, ConversationParticipant, Follow, Message, Post, Reel, User
 from schemas.message import ConversationCreate, MessageCreate, SharePostRequest, ShareReelRequest
 from services.notifications import create_notification
 from utils import conversation_dict, message_dict
@@ -16,11 +16,6 @@ router = APIRouter(prefix="/api/messages")
 def _require_participant(
     conversation_id: int, current_user_id: int, db: Session
 ) -> tuple[Conversation, list[int]]:
-    """
-    Fetch conversation + all participant IDs in two queries.
-    Raises 404/403 if invalid. Returns (conv, participant_ids) so
-    callers can reuse participant_ids without an extra query.
-    """
     conv = db.query(Conversation).filter(Conversation.id == conversation_id).first()
     if not conv:
         raise HTTPException(status_code=404, detail="conversation not found")
@@ -50,41 +45,60 @@ def create_or_get_conversation(
     if target.id == current_user_id:
         raise HTTPException(status_code=400, detail="cannot message yourself")
 
-    # Find an existing conversation that contains both users
+    # Find all existing conversations between these two users
     my_conv_ids = (
         db.query(ConversationParticipant.conversation_id)
         .filter(ConversationParticipant.user_id == current_user_id)
         .subquery()
     )
-    existing = (
-        db.query(ConversationParticipant)
+    shared_conv_ids = [
+        row.conversation_id
+        for row in db.query(ConversationParticipant.conversation_id)
         .filter(
             ConversationParticipant.user_id == body.user_id,
             ConversationParticipant.conversation_id.in_(my_conv_ids),
         )
-        .first()
-    )
+        .all()
+    ]
 
-    if existing:
-        conv = db.query(Conversation).filter(Conversation.id == existing.conversation_id).first()
-        last_msg = (
-            db.query(Message)
-            .filter(Message.conversation_id == conv.id)
-            .order_by(Message.created_at.desc())
+    if shared_conv_ids:
+        # Pick the best non-rejected conversation (prefer accepted, then request)
+        conv = (
+            db.query(Conversation)
+            .filter(
+                Conversation.id.in_(shared_conv_ids),
+                Conversation.status != "rejected",
+            )
+            .order_by(Conversation.id.desc())
             .first()
         )
-        return {"conversation": conversation_dict(conv, target, last_msg)}
+        if conv:
+            last_msg = (
+                db.query(Message)
+                .filter(Message.conversation_id == conv.id)
+                .order_by(Message.created_at.desc())
+                .first()
+            )
+            return {"conversation": conversation_dict(conv, target, last_msg)}
+
+    # Determine status based on whether the sender follows the recipient
+    is_sender_follower = (
+        db.query(Follow)
+        .filter(Follow.follower_id == current_user_id, Follow.following_id == body.user_id)
+        .first()
+        is not None
+    )
+    status = "accepted" if is_sender_follower else "request"
+    requester_id = current_user_id if status == "request" else None
 
     # Create conversation and add both participants atomically
-    conv = Conversation()
+    conv = Conversation(status=status, requester_id=requester_id)
     db.add(conv)
     db.flush()
     db.add(ConversationParticipant(conversation_id=conv.id, user_id=current_user_id))
     db.add(ConversationParticipant(conversation_id=conv.id, user_id=body.user_id))
     db.commit()
     db.refresh(conv)
-
-    create_notification(db, body.user_id, current_user_id, "message_request", conv.id, ws_manager=ws_manager)
 
     return {"conversation": conversation_dict(conv, target)}
 
@@ -104,9 +118,20 @@ def get_conversations(
     if not conv_ids:
         return {"conversations": []}
 
+    from sqlalchemy import or_, and_
     conversations = (
         db.query(Conversation)
-        .filter(Conversation.id.in_(conv_ids))
+        .filter(
+            Conversation.id.in_(conv_ids),
+            or_(
+                Conversation.status == "accepted",
+                # Show request conversations only to the person who sent them
+                and_(
+                    Conversation.status == "request",
+                    Conversation.requester_id == current_user_id,
+                ),
+            ),
+        )
         .all()
     )
 
@@ -146,7 +171,95 @@ def get_conversations(
         reverse=True,
     )
 
-    return {"conversations": result}
+    # Deduplicate: keep only the most recent conversation per other user
+    seen_user_ids: set[int] = set()
+    deduped = []
+    for c in result:
+        uid = (c.get("other_user") or {}).get("id")
+        if uid is None or uid not in seen_user_ids:
+            deduped.append(c)
+            if uid is not None:
+                seen_user_ids.add(uid)
+
+    return {"conversations": deduped}
+
+
+@router.get("/requests")
+def get_message_requests(
+    db: Session = Depends(get_db),
+    current_user_id: int = Depends(require_auth),
+):
+    """Returns incoming message requests (conversations where current_user is the recipient)."""
+    conv_ids = [
+        row.conversation_id
+        for row in db.query(ConversationParticipant.conversation_id)
+        .filter(ConversationParticipant.user_id == current_user_id)
+        .all()
+    ]
+
+    if not conv_ids:
+        return {"conversations": []}
+
+    request_convs = (
+        db.query(Conversation)
+        .filter(
+            Conversation.id.in_(conv_ids),
+            Conversation.status == "request",
+            Conversation.requester_id != current_user_id,
+        )
+        .all()
+    )
+
+    if not request_convs:
+        return {"conversations": []}
+
+    req_conv_ids = [c.id for c in request_convs]
+
+    other_participants = (
+        db.query(ConversationParticipant)
+        .options(joinedload(ConversationParticipant.user))
+        .filter(
+            ConversationParticipant.conversation_id.in_(req_conv_ids),
+            ConversationParticipant.user_id != current_user_id,
+        )
+        .all()
+    )
+    other_user_map = {p.conversation_id: p.user for p in other_participants}
+
+    max_msg_sq = (
+        db.query(Message.conversation_id, func.max(Message.id).label("max_id"))
+        .filter(Message.conversation_id.in_(req_conv_ids))
+        .group_by(Message.conversation_id)
+        .subquery()
+    )
+    last_msgs = db.query(Message).join(max_msg_sq, Message.id == max_msg_sq.c.max_id).all()
+    last_msg_map = {m.conversation_id: m for m in last_msgs}
+
+    result = [
+        conversation_dict(
+            conv,
+            other_user=other_user_map.get(conv.id),
+            last_message=last_msg_map.get(conv.id),
+        )
+        for conv in request_convs
+    ]
+
+    result.sort(
+        key=lambda c: (c["last_message"] or {}).get("created_at") or c["created_at"] or "",
+        reverse=True,
+    )
+
+    # Deduplicate: keep only the most recent request per other user
+    seen_user_ids: set[int] = set()
+    deduped = []
+    for c in result:
+        uid = (c.get("other_user") or {}).get("id")
+        if uid is None or uid not in seen_user_ids:
+            deduped.append(c)
+            if uid is not None:
+                seen_user_ids.add(uid)
+
+    return {"conversations": deduped}
 
 
 @router.get("/conversations/{conversation_id}/messages")
@@ -178,11 +291,25 @@ def send_message(
     db: Session = Depends(get_db),
     current_user_id: int = Depends(require_auth),
 ):
-    # _require_participant returns participant_ids — reuse for broadcast, no extra query
-    _, participant_ids = _require_participant(conversation_id, current_user_id, db)
+    conv, participant_ids = _require_participant(conversation_id, current_user_id, db)
 
     if not body.body.strip():
         raise HTTPException(status_code=400, detail="message body cannot be empty")
+
+    # Enforce one-message limit for request conversations (sender side only)
+    is_first_request_message = False
+    if conv.status == "request" and conv.requester_id == current_user_id:
+        existing_count = (
+            db.query(Message)
+            .filter(
+                Message.conversation_id == conversation_id,
+                Message.sender_id == current_user_id,
+            )
+            .count()
+        )
+        if existing_count > 0:
+            raise HTTPException(status_code=403, detail="Awaiting approval")
+        is_first_request_message = True
 
     msg = Message(
         conversation_id=conversation_id,
@@ -199,7 +326,69 @@ def send_message(
         {"type": "new_message", "conversation_id": conversation_id, "message": msg_data},
     )
 
+    # On the first request message: notify recipient and push the full conversation
+    # object so their Requests tab updates in real-time without a page refresh.
+    if is_first_request_message:
+        recipient_id = next(pid for pid in participant_ids if pid != current_user_id)
+        create_notification(db, recipient_id, current_user_id, "message_request", conv.id, ws_manager=ws_manager)
+
+        sender = db.query(User).filter(User.id == current_user_id).first()
+        conv_data = conversation_dict(conv, other_user=sender, last_message=msg)
+        ws_manager.broadcast_sync(
+            [recipient_id],
+            {"type": "new_conversation_request", "conversation": conv_data},
+        )
+
     return {"message": msg_data}
+
+
+@router.post("/conversations/{conversation_id}/accept")
+def accept_message_request(
+    conversation_id: int,
+    db: Session = Depends(get_db),
+    current_user_id: int = Depends(require_auth),
+):
+    """Accept an incoming message request. Only the recipient (non-requester) can accept."""
+    conv, participant_ids = _require_participant(conversation_id, current_user_id, db)
+
+    if conv.status != "request":
+        raise HTTPException(status_code=400, detail="conversation is not a request")
+    if conv.requester_id == current_user_id:
+        raise HTTPException(status_code=403, detail="cannot accept your own request")
+
+    conv.status = "accepted"
+    db.commit()
+
+    # Notify the requester
+    if conv.requester_id:
+        create_notification(db, conv.requester_id, current_user_id, "message_request_accepted", conv.id, ws_manager=ws_manager)
+
+    ws_manager.broadcast_sync(
+        participant_ids,
+        {"type": "conversation_accepted", "conversation_id": conv.id},
+    )
+
+    return {"ok": True}
+
+
+@router.delete("/conversations/{conversation_id}/request")
+def reject_message_request(
+    conversation_id: int,
+    db: Session = Depends(get_db),
+    current_user_id: int = Depends(require_auth),
+):
+    """Reject (delete) an incoming message request."""
+    conv, _ = _require_participant(conversation_id, current_user_id, db)
+
+    if conv.status != "request":
+        raise HTTPException(status_code=400, detail="conversation is not a request")
+    if conv.requester_id == current_user_id:
+        raise HTTPException(status_code=403, detail="cannot reject your own request")
+
+    conv.status = "rejected"
+    db.commit()
+
+    return {"ok": True}
 
 
 @router.post("/share/post/{post_id}", status_code=201)
@@ -222,7 +411,17 @@ def share_post(
 
     results = []
     for conv_id in body.conversation_ids:
-        _, participant_ids = _require_participant(conv_id, current_user_id, db)
+        conv, participant_ids = _require_participant(conv_id, current_user_id, db)
+
+        # Enforce one-message limit if this is a request conversation
+        if conv.status == "request" and conv.requester_id == current_user_id:
+            existing_count = (
+                db.query(Message)
+                .filter(Message.conversation_id == conv_id, Message.sender_id == current_user_id)
+                .count()
+            )
+            if existing_count > 0:
+                continue  # Skip this conversation silently
 
         msg = Message(
             conversation_id=conv_id,
@@ -267,7 +466,16 @@ def share_reel(
 
     results = []
     for conv_id in body.conversation_ids:
-        _, participant_ids = _require_participant(conv_id, current_user_id, db)
+        conv, participant_ids = _require_participant(conv_id, current_user_id, db)
+
+        if conv.status == "request" and conv.requester_id == current_user_id:
+            existing_count = (
+                db.query(Message)
+                .filter(Message.conversation_id == conv_id, Message.sender_id == current_user_id)
+                .count()
+            )
+            if existing_count > 0:
+                continue
 
         msg = Message(
             conversation_id=conv_id,

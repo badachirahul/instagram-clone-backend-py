@@ -35,6 +35,7 @@ def user_dict(user) -> dict:
         "email": user.email or "",
         "bio": user.bio or "",
         "profile_picture_url": user.profile_picture_url or "",
+        "is_private": bool(user.is_private),
         "created_at": fmt_dt(user.created_at),
     }
 
@@ -233,6 +234,8 @@ def message_dict(message) -> dict:
 def conversation_dict(conversation, other_user, last_message=None, unread_count=0) -> dict:
     return {
         "id": conversation.id,
+        "status": conversation.status or "accepted",
+        "requester_id": conversation.requester_id,
         "other_user": user_dict(other_user) if other_user else None,
         "last_message": message_dict(last_message) if last_message else None,
         "unread_count": unread_count,

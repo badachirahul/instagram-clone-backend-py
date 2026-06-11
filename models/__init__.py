@@ -15,3 +15,4 @@ from .message import Message
 from .story import Story
 from .story_view import StoryView
 from .notification import Notification
+from .follow_request import FollowRequest

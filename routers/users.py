@@ -4,11 +4,27 @@ from sqlalchemy.orm import Session, aliased, joinedload
 
 from database import get_db
 from dependencies import optional_auth, require_auth
-from models import Comment, Follow, Like, Post, SavedPost, User, Reel, ReelSave
+from models import Comment, Follow, FollowRequest, Like, Post, SavedPost, User, Reel, ReelSave
 from schemas.user import ProfileUpdate
 from utils import enrich_post, enrich_reel, user_dict
 
 router = APIRouter(prefix="/api/users")
+
+
+def _is_approved_viewer(target_user, current_user_id, db) -> bool:
+    """Return True if current_user can see private content on target_user's profile."""
+    if not target_user.is_private:
+        return True
+    if current_user_id is None:
+        return False
+    if current_user_id == target_user.id:
+        return True
+    return (
+        db.query(Follow)
+        .filter(Follow.follower_id == current_user_id, Follow.following_id == target_user.id)
+        .first()
+        is not None
+    )
 
 
 # ── Own profile ────────────────────────────────────────────────────────────────
@@ -26,6 +42,8 @@ def update_me(
         user.bio = body.bio
     if body.profile_picture_url is not None:
         user.profile_picture_url = body.profile_picture_url
+    if body.is_private is not None:
+        user.is_private = body.is_private
     db.commit()
     db.refresh(user)
     return {"user": user_dict(user)}
@@ -111,6 +129,7 @@ def search_users(q: str = "", db: Session = Depends(get_db)):
                 "id": u.id,
                 "username": u.username,
                 "profile_picture_url": u.profile_picture_url or "",
+                "is_private": bool(u.is_private),
             }
             for u in users
         ]
@@ -134,6 +153,7 @@ def get_profile(
     following_count = db.query(Follow).filter(Follow.follower_id == user_id).count()
 
     is_following = False
+    has_requested = False
     if current_user_id:
         is_following = (
             db.query(Follow)
@@ -141,16 +161,28 @@ def get_profile(
             .first()
             is not None
         )
+        if not is_following and user.is_private:
+            has_requested = (
+                db.query(FollowRequest)
+                .filter(
+                    FollowRequest.requester_id == current_user_id,
+                    FollowRequest.recipient_id == user_id,
+                )
+                .first()
+                is not None
+            )
 
     return {
         "id": user.id,
         "username": user.username,
         "bio": user.bio or "",
         "profile_picture_url": user.profile_picture_url or "",
+        "is_private": bool(user.is_private),
         "posts_count": posts_count,
         "followers_count": followers_count,
         "following_count": following_count,
         "is_following": is_following,
+        "has_requested": has_requested,
     }
 
 
@@ -160,6 +192,13 @@ def get_user_posts(
     db: Session = Depends(get_db),
     current_user_id=Depends(optional_auth),
 ):
+    target = db.query(User).filter(User.id == user_id).first()
+    if not target:
+        raise HTTPException(status_code=404, detail="user not found")
+
+    if not _is_approved_viewer(target, current_user_id, db):
+        return {"posts": [], "is_private": True}
+
     posts = (
         db.query(Post)
         .options(joinedload(Post.user))
@@ -176,6 +215,13 @@ def get_user_reels(
     db: Session = Depends(get_db),
     current_user_id=Depends(optional_auth),
 ):
+    target = db.query(User).filter(User.id == user_id).first()
+    if not target:
+        raise HTTPException(status_code=404, detail="user not found")
+
+    if not _is_approved_viewer(target, current_user_id, db):
+        return {"reels": [], "is_private": True}
+
     reels = (
         db.query(Reel)
         .options(joinedload(Reel.user))
