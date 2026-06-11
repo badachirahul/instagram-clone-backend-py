@@ -1,13 +1,50 @@
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy.orm import Session, joinedload
+from sqlalchemy import func
+from sqlalchemy.orm import Session, aliased, joinedload
 
 from database import get_db
 from dependencies import optional_auth, require_auth
 from models import Comment, Follow, Like, Post, SavedPost, User, Reel, ReelSave
+from schemas.user import ProfileUpdate
 from utils import enrich_post, enrich_reel, user_dict
 
 router = APIRouter(prefix="/api/users")
 
+
+# ── Own profile ────────────────────────────────────────────────────────────────
+
+@router.patch("/me")
+def update_me(
+    body: ProfileUpdate,
+    db: Session = Depends(get_db),
+    current_user_id: int = Depends(require_auth),
+):
+    user = db.query(User).filter(User.id == current_user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="user not found")
+    if body.bio is not None:
+        user.bio = body.bio
+    if body.profile_picture_url is not None:
+        user.profile_picture_url = body.profile_picture_url
+    db.commit()
+    db.refresh(user)
+    return {"user": user_dict(user)}
+
+
+@router.delete("/me/photo")
+def remove_profile_photo(
+    db: Session = Depends(get_db),
+    current_user_id: int = Depends(require_auth),
+):
+    user = db.query(User).filter(User.id == current_user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="user not found")
+    user.profile_picture_url = ""
+    db.commit()
+    return {"ok": True}
+
+
+# ── Saved content ──────────────────────────────────────────────────────────────
 
 @router.get("/me/saved-reels")
 def get_saved_reels(
@@ -51,11 +88,12 @@ def get_saved_posts(
         .filter(Post.id.in_(post_ids))
         .all()
     )
-    # Preserve saved order
     posts_by_id = {p.id: p for p in posts}
     ordered = [posts_by_id[pid] for pid in post_ids if pid in posts_by_id]
     return {"posts": [enrich_post(p, db, current_user_id) for p in ordered]}
 
+
+# ── Search ─────────────────────────────────────────────────────────────────────
 
 @router.get("/search")
 def search_users(q: str = "", db: Session = Depends(get_db)):
@@ -78,6 +116,8 @@ def search_users(q: str = "", db: Session = Depends(get_db)):
         ]
     }
 
+
+# ── Profile ────────────────────────────────────────────────────────────────────
 
 @router.get("/{user_id}")
 def get_profile(
@@ -179,4 +219,38 @@ def get_following(user_id: int, db: Session = Depends(get_db)):
             for f in follows
             if f.following
         ]
+    }
+
+
+@router.get("/{user_id}/mutual-followers")
+def get_mutual_followers(
+    user_id: int,
+    db: Session = Depends(get_db),
+    current_user_id: int = Depends(require_auth),
+):
+    """People the current user follows who also follow user_id."""
+    F1 = aliased(Follow)  # they follow user_id
+    F2 = aliased(Follow)  # current_user follows them
+
+    mutual = (
+        db.query(User)
+        .join(F1, (F1.follower_id == User.id) & (F1.following_id == user_id))
+        .join(F2, (F2.follower_id == current_user_id) & (F2.following_id == User.id))
+        .limit(3)
+        .all()
+    )
+
+    total = (
+        db.query(func.count(User.id))
+        .join(F1, (F1.follower_id == User.id) & (F1.following_id == user_id))
+        .join(F2, (F2.follower_id == current_user_id) & (F2.following_id == User.id))
+        .scalar()
+    ) or 0
+
+    return {
+        "count": total,
+        "users": [
+            {"id": u.id, "username": u.username, "profile_picture_url": u.profile_picture_url or ""}
+            for u in mutual
+        ],
     }
