@@ -24,7 +24,8 @@ def decode_token(token: str):
 def fmt_dt(dt) -> str:
     if dt is None:
         return None
-    return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+    # No 'Z' suffix — stored as naive local time, let the client treat it as local
+    return dt.strftime("%Y-%m-%dT%H:%M:%S")
 
 
 def user_dict(user) -> dict:
@@ -187,11 +188,43 @@ def enrich_post(post, db, current_user_id=None) -> dict:
 
 
 def message_dict(message) -> dict:
+    sp = message.shared_post  # None when FK is NULL (no extra query)
+    sr = message.shared_reel
+
+    shared_post_data = None
+    if sp:
+        shared_post_data = {
+            "id": sp.id,
+            "image_url": sp.image_url,
+            "caption": sp.caption or "",
+            "user": {
+                "id": sp.user.id,
+                "username": sp.user.username,
+                "profile_picture_url": sp.user.profile_picture_url or "",
+            } if sp.user else None,
+        }
+
+    shared_reel_data = None
+    if sr:
+        shared_reel_data = {
+            "id": sr.id,
+            "thumbnail_url": sr.thumbnail_url or "",
+            "caption": sr.caption or "",
+            "user": {
+                "id": sr.user.id,
+                "username": sr.user.username,
+                "profile_picture_url": sr.user.profile_picture_url or "",
+            } if sr.user else None,
+        }
+
     return {
         "id": message.id,
         "conversation_id": message.conversation_id,
         "sender_id": message.sender_id,
-        "body": message.body,
+        "body": message.body or "",
+        "message_type": message.message_type or "text",
+        "shared_post": shared_post_data,
+        "shared_reel": shared_reel_data,
         "created_at": fmt_dt(message.created_at),
         "is_deleted_for_everyone": message.is_deleted_for_everyone,
     }

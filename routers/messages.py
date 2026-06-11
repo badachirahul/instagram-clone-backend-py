@@ -4,8 +4,8 @@ from sqlalchemy.orm import Session, joinedload
 
 from database import get_db
 from dependencies import require_auth
-from models import Conversation, ConversationParticipant, Message, User
-from schemas.message import ConversationCreate, MessageCreate
+from models import Conversation, ConversationParticipant, Message, Post, Reel, User
+from schemas.message import ConversationCreate, MessageCreate, SharePostRequest, ShareReelRequest
 from services.notifications import create_notification
 from utils import conversation_dict, message_dict
 from ws_manager import manager as ws_manager
@@ -159,6 +159,10 @@ def get_messages(
 
     msgs = (
         db.query(Message)
+        .options(
+            joinedload(Message.shared_post).joinedload(Post.user),
+            joinedload(Message.shared_reel).joinedload(Reel.user),
+        )
         .filter(Message.conversation_id == conversation_id)
         .order_by(Message.created_at.asc())
         .all()
@@ -196,6 +200,95 @@ def send_message(
     )
 
     return {"message": msg_data}
+
+
+@router.post("/share/post/{post_id}", status_code=201)
+def share_post(
+    post_id: int,
+    body: SharePostRequest,
+    db: Session = Depends(get_db),
+    current_user_id: int = Depends(require_auth),
+):
+    post = (
+        db.query(Post)
+        .options(joinedload(Post.user))
+        .filter(Post.id == post_id)
+        .first()
+    )
+    if not post:
+        raise HTTPException(status_code=404, detail="post not found")
+    if not body.conversation_ids:
+        raise HTTPException(status_code=400, detail="conversation_ids required")
+
+    results = []
+    for conv_id in body.conversation_ids:
+        _, participant_ids = _require_participant(conv_id, current_user_id, db)
+
+        msg = Message(
+            conversation_id=conv_id,
+            sender_id=current_user_id,
+            body="",
+            message_type="shared_post",
+            shared_post_id=post_id,
+        )
+        db.add(msg)
+        db.commit()
+        db.refresh(msg)
+
+        # Attach the already-loaded post so message_dict can serialize it
+        msg.shared_post = post
+        msg_data = message_dict(msg)
+        ws_manager.broadcast_sync(
+            participant_ids,
+            {"type": "new_message", "conversation_id": conv_id, "message": msg_data},
+        )
+        results.append(msg_data)
+
+    return {"messages": results}
+
+
+@router.post("/share/reel/{reel_id}", status_code=201)
+def share_reel(
+    reel_id: int,
+    body: ShareReelRequest,
+    db: Session = Depends(get_db),
+    current_user_id: int = Depends(require_auth),
+):
+    reel = (
+        db.query(Reel)
+        .options(joinedload(Reel.user))
+        .filter(Reel.id == reel_id)
+        .first()
+    )
+    if not reel:
+        raise HTTPException(status_code=404, detail="reel not found")
+    if not body.conversation_ids:
+        raise HTTPException(status_code=400, detail="conversation_ids required")
+
+    results = []
+    for conv_id in body.conversation_ids:
+        _, participant_ids = _require_participant(conv_id, current_user_id, db)
+
+        msg = Message(
+            conversation_id=conv_id,
+            sender_id=current_user_id,
+            body="",
+            message_type="shared_reel",
+            shared_reel_id=reel_id,
+        )
+        db.add(msg)
+        db.commit()
+        db.refresh(msg)
+
+        msg.shared_reel = reel
+        msg_data = message_dict(msg)
+        ws_manager.broadcast_sync(
+            participant_ids,
+            {"type": "new_message", "conversation_id": conv_id, "message": msg_data},
+        )
+        results.append(msg_data)
+
+    return {"messages": results}
 
 
 @router.delete("/{message_id}")

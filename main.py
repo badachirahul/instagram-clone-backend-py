@@ -14,6 +14,20 @@ from ws_manager import manager as ws_manager
 
 Base.metadata.create_all(bind=engine)
 
+# Add share columns to messages if they don't exist yet
+from sqlalchemy import text as _text
+with engine.connect() as _conn:
+    for _sql in [
+        "ALTER TABLE messages ADD COLUMN IF NOT EXISTS message_type VARCHAR NOT NULL DEFAULT 'text'",
+        "ALTER TABLE messages ADD COLUMN IF NOT EXISTS shared_post_id INTEGER REFERENCES posts(id)",
+        "ALTER TABLE messages ADD COLUMN IF NOT EXISTS shared_reel_id INTEGER REFERENCES reels(id)",
+    ]:
+        try:
+            _conn.execute(_text(_sql))
+            _conn.commit()
+        except Exception:
+            _conn.rollback()
+
 app = FastAPI()
 
 
